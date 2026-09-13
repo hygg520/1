@@ -2,131 +2,257 @@ return function(Window, WindUI) local Players = game:GetService("Players") local
 
 local clickerEnabled = false
 local clickerCPS = nil
-local clickerConnection = nil
-local clickerButton = nil
-local clickerScreenGui = nil
-local clickerDragging = false
-local clickerDragStart = nil
-local clickerStartPos = nil
+local clickerUI = nil
+local clickerConns = {}
+local clickerRunning = false
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local isMobile = UserInputService.TouchEnabled
 
-local function createClickerUI()
-    if clickerScreenGui and clickerScreenGui.Parent then
-        return
+local clickerSettings = {
+    clickDelay = 0.5,
+    pressDuration = 0.01,
+    targets = {},
+    pointsVisible = true
+}
+
+local function safeConnect(signal, func)
+    local c = signal:Connect(func)
+    table.insert(clickerConns, c)
+    return c
+end
+
+local function buildAutoClicker()
+    if clickerUI then return end
+
+    local Targets = clickerSettings.targets
+    local pointsVisible = clickerSettings.pointsVisible
+
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "BS_AutoClicker_Classic"
+    ScreenGui.ResetOnSpawn = false
+    pcall(function() ScreenGui.Parent = CoreGui end)
+    if not ScreenGui.Parent then
+        ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+    clickerUI = ScreenGui
+
+    local Panel = Instance.new("Frame")
+    Panel.Name = "MainPanel"
+    Panel.Parent = ScreenGui
+    Panel.BackgroundColor3 = Color3.new(1, 1, 1)
+    Panel.BackgroundTransparency = 0.2
+    Panel.Position = UDim2.new(0, 16, 0, 34)
+    Panel.Size = UDim2.new(0, 30, 0, 204)
+    Panel.BorderSizePixel = 0
+    Instance.new("UICorner", Panel).CornerRadius = UDim.new(0, 2)
+
+    local layout = Instance.new("UIListLayout")
+    layout.Parent = Panel
+    layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    layout.Padding = UDim.new(0, 2)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local Icons = {
+        Remove   = "rbxassetid://122610572797061",
+        Start    = "rbxassetid://128832474920642",
+        Stop     = "rbxassetid://113047868752296",
+        Add      = "rbxassetid://80871366492449",
+        Show     = "rbxassetid://89558029527587",
+        Hidden   = "rbxassetid://82900330630483",
+        Drag     = "rbxassetid://139381026962112",
+        Settings = "rbxassetid://70541424009556"
+    }
+
+    local function makeDrag(obj, handle)
+        handle = handle or obj
+        local state = {}
+        safeConnect(handle.InputBegan, function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                state[input] = {startPos = obj.Position, dragStart = input.Position}
+            end
+        end)
+        safeConnect(handle.InputEnded, function(input)
+            state[input] = nil
+        end)
+        safeConnect(UserInputService.InputChanged, function(input)
+            if state[input] then
+                local delta = input.Position - state[input].dragStart
+                obj.Position = UDim2.new(
+                    state[input].startPos.X.Scale,
+                    state[input].startPos.X.Offset + delta.X,
+                    state[input].startPos.Y.Scale,
+                    state[input].startPos.Y.Offset + delta.Y
+                )
+            end
+        end)
     end
 
-    local sg = Instance.new("ScreenGui")
-    sg.Name = "BS_ClickerUI"
-    sg.ResetOnSpawn = false
-    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    makeDrag(Panel)
 
-    local ok = pcall(function()
-        sg.Parent = game:GetService("CoreGui")
-    end)
-    if not ok or not sg.Parent then
-        sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    local function createBtn(name, icon, order, scale)
+        local btn = Instance.new("ImageButton")
+        btn.Name = name
+        btn.Parent = Panel
+        btn.BackgroundTransparency = 1
+        btn.Image = icon
+        btn.ImageColor3 = Color3.new(0, 0, 0)
+        btn.LayoutOrder = order
+        local sz = (name == "EyeBtn" and 20 or 24) * (scale or 1)
+        btn.Size = UDim2.new(0, sz, 0, sz)
+        return btn
     end
 
-    local btn = Instance.new("TextButton")
-    btn.Name = "ClickerButton"
-    btn.Size = UDim2.new(0, 80, 0, 80)
-    btn.Position = UDim2.new(0.5, -40, 0.5, -40)
-    btn.BackgroundColor3 = Color3.fromRGB(60, 110, 255)
-    btn.Text = "1"
-    btn.TextColor3 = Color3.new(1, 1, 1)
-    btn.TextScaled = true
-    btn.Font = Enum.Font.GothamBlack
-    btn.Active = true
-    btn.Parent = sg
+    local function createSpacer(h, order)
+        local f = Instance.new("Frame")
+        f.Name = "Spacer"
+        f.Parent = Panel
+        f.BackgroundTransparency = 1
+        f.Size = UDim2.new(0, 24, 0, h)
+        f.LayoutOrder = order
+    end
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(1, 0)
-    corner.Parent = btn
+    local PlayBtn   = createBtn("PlayBtn", Icons.Start, 1, 1)
+    local AddBtn    = createBtn("AddBtn", Icons.Add, 2, 1)
+    local RemoveBtn = createBtn("RemoveBtn", Icons.Remove, 3, 1)
+    createSpacer(6, 4)
+    local SettingsBtn = createBtn("SettingsBtn", Icons.Settings, 5, 0.6)
+    createSpacer(6, 6)
+    local EyeBtn = createBtn("EyeBtn", pointsVisible and Icons.Show or Icons.Hidden, 7, 1)
+    createSpacer(6, 8)
+    local DragBtn = createBtn("DragBtn", Icons.Drag, 9, 0.6)
 
-    clickerScreenGui = sg
-    clickerButton = btn
+    local function createDot(index, savedPos)
+        local dot = Instance.new("ImageLabel")
+        dot.Name = "ClickDot"
+        dot.Parent = ScreenGui
+        dot.BackgroundColor3 = Color3.new(1, 1, 1)
+        dot.BackgroundTransparency = 0.9
+        dot.Size = UDim2.new(0, 20, 0, 20)
+        dot.Visible = pointsVisible
+        dot.Active = false
+        Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
 
-    btn.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            clickerDragging = true
-            clickerDragStart = input.Position
-            clickerStartPos = btn.Position
+        local icon = Instance.new("ImageLabel")
+        icon.Name = "Icon"
+        icon.Parent = dot
+        icon.Image = "rbxassetid://110626268563466"
+        icon.Size = UDim2.new(0, 30, 0, 30)
+        icon.Position = UDim2.new(0.5, 0, 0.5, 0)
+        icon.AnchorPoint = Vector2.new(0.5, 0.5)
+        icon.BackgroundTransparency = 1
+
+        local label = Instance.new("TextLabel")
+        label.Parent = dot
+        label.Size = UDim2.new(1, 0, 1, 0)
+        label.BackgroundTransparency = 1
+        label.Text = tostring(index)
+        label.Font = Enum.Font.GothamBold
+        label.TextSize = 16
+
+        if savedPos then
+            dot.Position = UDim2.new(unpack(savedPos))
+        else
+            local ox = ((index - 1) % 5) * 40
+            local oy = math.floor((index - 1) / 5) * 40
+            dot.Position = UDim2.new(0.5, ox - 80, 0.5, oy - 40)
         end
+
+        makeDrag(dot)
+        return dot
+    end
+
+    safeConnect(AddBtn.MouseButton1Click, function()
+        local dot = createDot(#Targets + 1)
+        table.insert(Targets, dot)
     end)
 
-    UserInputService.InputChanged:Connect(function(input)
-        if clickerDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - clickerDragStart
-            btn.Position = UDim2.new(
-                clickerStartPos.X.Scale,
-                clickerStartPos.X.Offset + delta.X,
-                clickerStartPos.Y.Scale,
-                clickerStartPos.Y.Offset + delta.Y
-            )
-        end
+    safeConnect(RemoveBtn.MouseButton1Click, function()
+        local last = table.remove(Targets)
+        if last then last:Destroy() end
     end)
 
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            clickerDragging = false
-        end
+    safeConnect(SettingsBtn.MouseButton1Click, function()
+        WindUI:Notify({
+            Title = "连点器",
+            Content = "请在「通用 → 连点器」输入每秒点击次数",
+            Duration = 3
+        })
     end)
-end
 
-local function destroyClickerUI()
-    if clickerScreenGui then
-        clickerScreenGui:Destroy()
-    end
-    clickerScreenGui = nil
-    clickerButton = nil
-end
+    safeConnect(EyeBtn.MouseButton1Click, function()
+        pointsVisible = not pointsVisible
+        clickerSettings.pointsVisible = pointsVisible
+        EyeBtn.Image = pointsVisible and Icons.Show or Icons.Hidden
+        for _, dot in ipairs(Targets) do dot.Visible = pointsVisible end
+    end)
 
-local function getClickPosition()
-    if clickerButton and clickerButton.Parent then
-        local absPos = clickerButton.AbsolutePosition
-        local absSize = clickerButton.AbsoluteSize
-        return Vector2.new(absPos.X + absSize.X / 2, absPos.Y + absSize.Y / 2)
-    end
-    return nil
-end
+    safeConnect(DragBtn.MouseButton1Click, function()
+        WindUI:Notify({
+            Title = "连点器",
+            Content = "拖动圆点即可调整点击位置",
+            Duration = 3
+        })
+    end)
 
-local function stopClicker()
-    clickerEnabled = false
-    if clickerConnection then
-        clickerConnection:Disconnect()
-        clickerConnection = nil
-    end
-end
-
-local function startClicker()
-    if not clickerCPS or clickerCPS <= 0 then
-        return false
-    end
-
-    if clickerConnection then
-        clickerConnection:Disconnect()
-        clickerConnection = nil
-    end
-
-    local interval = 1 / clickerCPS
-    clickerEnabled = true
-
-    clickerConnection = RunService.Heartbeat:Connect(function()
-        if not clickerEnabled then
+    safeConnect(PlayBtn.MouseButton1Click, function()
+        if #Targets == 0 then
+            WindUI:Notify({Title = "连点器", Content = "请先点击 + 添加点击点", Duration = 3})
             return
         end
-        local pos = getClickPosition()
-        if pos then
-            pcall(function()
-                VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-                task.wait()
-                VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-            end)
-        end
-        task.wait(interval)
-    end)
 
-    return true
+        clickerRunning = not clickerRunning
+        if clickerRunning then
+            Panel.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+            Panel.BackgroundTransparency = 0.5
+            PlayBtn.Image = Icons.Stop
+            for _, dot in ipairs(Targets) do dot.BackgroundTransparency = 0.7 end
+
+            task.spawn(function()
+                local interval = clickerCPS and (1 / clickerCPS) or clickerSettings.clickDelay
+                local last = tick()
+                while clickerRunning do
+                    local now = tick()
+                    if now - last >= interval then
+                        last = now
+                        for _, target in ipairs(Targets) do
+                            if not clickerRunning then break end
+                            local pos = target.AbsolutePosition
+                            local size = target.AbsoluteSize
+                            local x = pos.X + size.X / 2
+                            local y = pos.Y + size.Y / 2
+                            pcall(function()
+                                VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                                task.wait(clickerSettings.pressDuration)
+                                VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+                            end)
+                        end
+                    end
+                    task.wait()
+                end
+                Panel.BackgroundColor3 = Color3.new(1, 1, 1)
+                Panel.BackgroundTransparency = 0.2
+                PlayBtn.Image = Icons.Start
+                for _, dot in ipairs(Targets) do dot.BackgroundTransparency = 0.9 end
+                clickerRunning = false
+            end)
+        else
+            Panel.BackgroundColor3 = Color3.new(1, 1, 1)
+            Panel.BackgroundTransparency = 0.2
+            PlayBtn.Image = Icons.Start
+            for _, dot in ipairs(Targets) do dot.BackgroundTransparency = 0.9 end
+        end
+    end)
+end
+
+local function destroyAutoClicker()
+    if not clickerUI then return end
+    for _, c in ipairs(clickerConns) do pcall(function() c:Disconnect() end) end
+    clickerConns = {}
+    clickerUI:Destroy()
+    clickerUI = nil
+    clickerRunning = false
 end
 
 clickerSection:Toggle({
@@ -138,16 +264,10 @@ clickerSection:Toggle({
                 _G.NotifyWarning("连点器", "请先输入每秒点击次数", 3)
                 return false
             end
-            createClickerUI()
-            local ok = startClicker()
-            if ok then
-                _G.NotifySuccess("连点器", "已开启，每秒点击 " .. clickerCPS .. " 次", 3)
-            else
-                _G.NotifyError("连点器", "启动失败", 3)
-            end
+            buildAutoClicker()
+            _G.NotifySuccess("连点器", "已开启，每秒点击 " .. clickerCPS .. " 次", 3)
         else
-            stopClicker()
-            destroyClickerUI()
+            destroyAutoClicker()
             _G.Notify("连点器", "已关闭", 3)
         end
     end
@@ -165,9 +285,7 @@ clickerSection:Input({
         end
         clickerCPS = math.floor(num)
         local intervalMs = math.floor(1000 / clickerCPS + 0.5)
+        clickerSettings.clickDelay = intervalMs / 1000
         _G.NotifySuccess("连点器", "已设置为每秒点击 " .. clickerCPS .. " 次", 3)
-        if clickerEnabled then
-            startClicker()
-        end
     end
 }) local lightSection = tab:Section({Title = "光影效果"}) local originalLighting2 = {} local originalTerrain = {} local createdEffects = {} local runningConnections = {} local function clearEffects() for _, effect in ipairs(createdEffects) do effect:Destroy() end createdEffects = {} for _, conn in ipairs(runningConnections) do conn:Disconnect() end runningConnections = {} end local function saveLighting() originalLighting2 = { Brightness = Lighting.Brightness, Ambient = Lighting.Ambient, OutdoorAmbient = Lighting.OutdoorAmbient, GlobalShadows = Lighting.GlobalShadows, ShadowSoftness = Lighting.ShadowSoftness, FogColor = Lighting.FogColor, FogEnd = Lighting.FogEnd, FogStart = Lighting.FogStart, ClockTime = Lighting.ClockTime, GeographicLatitude = Lighting.GeographicLatitude, ExposureCompensation = Lighting.ExposureCompensation, EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale, EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale } local terrain = Workspace:FindFirstChildOfClass("Terrain") if terrain then originalTerrain = { WaterReflectance = terrain.WaterReflectance, WaterTransparency = terrain.WaterTransparency, WaterWaveSize = terrain.WaterWaveSize, WaterWaveSpeed = terrain.WaterWaveSpeed, WaterColor = terrain.WaterColor } end end local function restoreLighting() for key, value in pairs(originalLighting2) do Lighting[key] = value end local terrain = Workspace:FindFirstChildOfClass("Terrain") if terrain then for key, value in pairs(originalTerrain) do terrain[key] = value end end end local function createEffect(effectType, properties) local effect = Instance.new(effectType) for prop, value in pairs(properties) do if effect[prop] ~= nil then effect[prop] = value end end effect.Parent = Lighting table.insert(createdEffects, effect) return effect end lightSection:Toggle({ Title = "真实光影", Value = false, Callback = function(val) if val then saveLighting() clearEffects() Lighting.Brightness = 0.2 Lighting.Ambient = Color3.new(0, 0, 0) Lighting.OutdoorAmbient = Color3.new(0, 0, 0) Lighting.GlobalShadows = false Lighting.EnvironmentDiffuseScale = 0 Lighting.EnvironmentSpecularScale = 0 else clearEffects() restoreLighting() end end }) lightSection:Toggle({ Title = "明亮光影", Value = false, Callback = function(val) if val then saveLighting() clearEffects() Lighting.ClockTime = 12 Lighting.GeographicLatitude = 0 Lighting.GlobalShadows = true Lighting.ShadowSoftness = 0.3 Lighting.Brightness = 3 Lighting.OutdoorAmbient = Color3.new(0.8, 0.8, 0.8) Lighting.Ambient = Color3.new(0.6, 0.6, 0.6) Lighting.Technology = Enum.Technology.ShadowMap createEffect("SunRaysEffect", {Intensity = 0.2, Spread = 0.5}) createEffect("BloomEffect", {Intensity = 0.3, Size = 10}) createEffect("Atmosphere", {Density = 0.1, Offset = 0.5, Color = Color3.new(0.9, 0.9, 0.9), Decay = Color3.new(0.9, 0.9, 0.9), Glare = 0, Haze = 0}) createEffect("ColorCorrectionEffect", {Saturation = -0.1, Contrast = 0.1}) createEffect("BlurEffect", {Size = 1}) else clearEffects() restoreLighting() end end }) lightSection:Toggle({ Title = "画质增强Pro Max", Value = false, Callback = function(val) if val then saveLighting() clearEffects() for _, child in ipairs(Lighting:GetChildren()) do if child:IsA("PostEffect") or child:IsA("Sky") then child:Destroy() end end createEffect("ColorCorrectionEffect", {Contrast = 0.18, Brightness = 0.05, Saturation = 0.3, TintColor = Color3.fromRGB(255, 242, 230)}) createEffect("BloomEffect", {Intensity = 0.25, Size = 48, Threshold = 0.85}) createEffect("SunRaysEffect", {Intensity = 0.25, Spread = 1.0}) createEffect("Atmosphere", {Density = 0.4, Offset = 0.25, Color = Color3.fromRGB(220, 220, 255), Decay = Color3.fromRGB(20, 25, 45), Glare = 0.15, Haze = 0.25}) local sky = Instance.new("Sky") sky.Parent = Lighting sky.SkyboxBk = "rbxassetid://6444337006" sky.SkyboxDn = "rbxassetid://6444336728" sky.SkyboxFt = "rbxassetid://6444337006" sky.SkyboxLf = "rbxassetid://6444337006" sky.SkyboxRt = "rbxassetid://6444337006" sky.SkyboxUp = "rbxassetid://6444336728" sky.StarCount = 3000 table.insert(createdEffects, sky) Lighting.GlobalShadows = true Lighting.ShadowSoftness = 0.05 Lighting.Brightness = 2.8 Lighting.ExposureCompensation = 0.7 Lighting.FogColor = Color3.fromRGB(140, 158, 178) Lighting.FogEnd = 3000 local terrain = Workspace:FindFirstChildOfClass("Terrain") if terrain then terrain.WaterReflectance = 0.35 terrain.WaterTransparency = 0.88 terrain.WaterWaveSize = 0.15 terrain.WaterWaveSpeed = 25 terrain.WaterColor = Color3.fromRGB(72, 141, 202) end else clearEffects() restoreLighting() end end }) lightSection:Toggle({ Title = "固定黄昏光影", Value = false, Callback = function(val) if val then saveLighting() clearEffects() for _, child in ipairs(Lighting:GetChildren()) do if child:IsA("PostEffect") or child:IsA("Atmosphere") then child:Destroy() end end Lighting.GlobalShadows = true Lighting.ShadowSoftness = 0.06 Lighting.Brightness = 3.5 Lighting.ExposureCompensation = 0.5 Lighting.EnvironmentSpecularScale = 1.2 Lighting.EnvironmentDiffuseScale = 0.5 Lighting.FogColor = Color3.fromRGB(130, 140, 160) Lighting.FogEnd = 8000 Lighting.FogStart = 50 Lighting.OutdoorAmbient = Color3.fromRGB(120, 130, 150) Lighting.GeographicLatitude = 40.0 Lighting.ClockTime = 16.5 createEffect("ColorCorrectionEffect", {Contrast = 0.15, Brightness = 0.04, Saturation = 0.25, TintColor = Color3.fromRGB(255, 245, 235)}) createEffect("BloomEffect", {Intensity = 0.08, Size = 40, Threshold = 0.95}) createEffect("SunRaysEffect", {Intensity = 0.22, Spread = 0.8}) createEffect("DepthOfFieldEffect", {FarIntensity = 0.1, FocusDistance = 35, InFocusRadius = 22, NearIntensity = 0.3}) createEffect("Atmosphere", {Density = 0.25, Offset = 0.25, Color = Color3.fromRGB(180, 190, 210), Decay = Color3.fromRGB(35, 40, 50), Haze = 0.12}) local terrain = Workspace:FindFirstChildOfClass("Terrain") if terrain then terrain.WaterReflectance = 0.2 terrain.WaterTransparency = 0.93 terrain.WaterWaveSize = 0.12 terrain.WaterWaveSpeed = 16 terrain.WaterColor = Color3.fromRGB(75, 135, 200) end local sky = Lighting:FindFirstChildOfClass("Sky") or Instance.new("Sky") sky.Parent = Lighting sky.CelestialBodiesShown = true sky.StarCount = 3500 sky.SkyboxBk = "rbxassetid://2711140172" sky.SkyboxDn = "rbxassetid://2711140372" sky.SkyboxFt = "rbxassetid://2711140592" sky.SkyboxLf = "rbxassetid://2711140792" sky.SkyboxRt = "rbxassetid://2711141042" sky.SkyboxUp = "rbxassetid://2711141282" table.insert(createdEffects, sky) Workspace.CurrentCamera.FieldOfView = 70 else clearEffects() restoreLighting() end end }) return tab end
